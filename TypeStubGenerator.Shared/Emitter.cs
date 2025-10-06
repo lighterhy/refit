@@ -1,8 +1,8 @@
-﻿using System.Linq;
+﻿namespace Refit.Generator;
+using System.Linq;
 using System.Text;
-using Microsoft.CodeAnalysis.Text;
 
-namespace Refit.Generator;
+using Microsoft.CodeAnalysis.Text;
 
 internal static class Emitter
 {
@@ -13,7 +13,7 @@ internal static class Emitter
         Action<string, SourceText> addSource
     )
     {
-        if (model.Interfaces.Count == 0)
+        if (model.Types.Count == 0)
             return;
 
         var attributeText = $$"""
@@ -69,7 +69,7 @@ internal static class Emitter
         addSource("Generated.g.cs", SourceText.From(generatedClassText, Encoding.UTF8));
     }
 
-    public static SourceText EmitInterface(InterfaceModel model)
+    public static SourceText EmitType(TypeModel model)
     {
         var source = new SourceWriter();
 
@@ -97,7 +97,7 @@ internal static class Emitter
                 [global::System.Reflection.Obfuscation(Exclude=true)]
                 [global::System.ComponentModel.EditorBrowsable(global::System.ComponentModel.EditorBrowsableState.Never)]
                 partial class {{model.Ns}}{{model.ClassDeclaration}}
-                    : {{model.InterfaceDisplayName}}
+                    : {{model.TypeDisplayName}}
             """
         );
 
@@ -186,7 +186,7 @@ internal static class Emitter
         var (isAsync, @return, configureAwait) = methodModel.ReturnTypeMetadata switch
         {
             ReturnTypeInfo.AsyncVoid => (true, "await (", ").ConfigureAwait(false)"),
-            ReturnTypeInfo.AsyncResult => (true, "return await (", ").ConfigureAwait(false)"),
+            ReturnTypeInfo.AsyncResult => (false, "return ", ""),
             ReturnTypeInfo.Return => (false, "return ", ""),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(methodModel.ReturnTypeMetadata),
@@ -299,11 +299,12 @@ internal static class Emitter
     {
         var visibility = !isExplicitInterface ? "public " : string.Empty;
         var async = isAsync ? "async " : "";
+        var @override = methodModel.IsAbstract ? "override " : string.Empty;
 
         var builder = new StringBuilder();
         builder.Append(
             @$"/// <inheritdoc />
-{visibility}{async}{methodModel.ReturnType} "
+{visibility}{@override}{async}{methodModel.ReturnType} "
         );
 
         if (isExplicitInterface)
@@ -325,7 +326,7 @@ internal static class Emitter
             builder.Append(string.Join(", ", list));
         }
 
-        builder.Append(")");
+        builder.Append(')');
 
         source.WriteLine();
         source.WriteLine(builder.ToString());

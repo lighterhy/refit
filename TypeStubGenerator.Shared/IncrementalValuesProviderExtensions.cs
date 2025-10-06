@@ -52,14 +52,14 @@ internal static class IncrementalValuesProviderExtensions
     /// <param name="model">The interfaces stubs.</param>
     public static void EmitSource(
         this IncrementalGeneratorInitializationContext context,
-        IncrementalValuesProvider<InterfaceModel> model
+        IncrementalValuesProvider<TypeModel> model
     )
     {
         context.RegisterImplementationSourceOutput(
             model,
             static (spc, model) =>
             {
-                var mapperText = Emitter.EmitInterface(model);
+                var mapperText = Emitter.EmitType(model);
                 spc.AddSource(model.FileName, mapperText);
             }
         );

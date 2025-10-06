@@ -1,12 +1,12 @@
 ﻿namespace Refit.Generator;
 
-internal sealed record InterfaceModel(
+internal sealed record TypeModel(
     string PreserveAttributeDisplayName,
     string FileName,
     string ClassName,
     string Ns,
     string ClassDeclaration,
-    string InterfaceDisplayName,
+    string TypeDisplayName,
     string ClassSuffix,
     ImmutableEquatableArray<TypeConstraint> Constraints,
     ImmutableEquatableArray<string> MemberNames,

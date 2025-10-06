@@ -1,11 +1,12 @@
-﻿using System.Collections.Immutable;
+﻿namespace Refit.Generator;
+
+using System.Collections.Immutable;
 using System.Text;
+
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
-
-namespace Refit.Generator;
 
 internal static class Parser
 {
@@ -15,17 +16,17 @@ internal static class Parser
     /// <param name="compilation">The compilation.</param>
     /// <param name="refitInternalNamespace">The refit internal namespace.</param>
     /// <param name="candidateMethods">The candidate methods.</param>
-    /// <param name="candidateInterfaces">The candidate interfaces.</param>
+    /// <param name="candidateBaseTypes">The candidate interfaces.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns></returns>
     public static (
         List<Diagnostic> diagnostics,
         ContextGenerationModel contextGenerationSpec
-    ) GenerateInterfaceStubs(
+    ) GenerateBaseTypeStubs(
         CSharpCompilation compilation,
         string? refitInternalNamespace,
         ImmutableArray<MethodDeclarationSyntax> candidateMethods,
-        ImmutableArray<InterfaceDeclarationSyntax> candidateInterfaces,
+        ImmutableArray<TypeDeclarationSyntax> candidateBaseTypes,
         CancellationToken cancellationToken
     )
     {
@@ -57,7 +58,7 @@ internal static class Parser
                 new ContextGenerationModel(
                     refitInternalNamespace,
                     string.Empty,
-                    ImmutableEquatableArray.Empty<InterfaceModel>()
+                    ImmutableEquatableArray.Empty<TypeModel>()
                 )
             );
         }
@@ -92,7 +93,7 @@ internal static class Parser
             }
         }
 
-        var interfaces = methodSymbols
+        var types = methodSymbols
             .GroupBy<IMethodSymbol, INamedTypeSymbol>(
                 m => m.ContainingType,
                 SymbolEqualityComparer.Default
@@ -103,37 +104,47 @@ internal static class Parser
                 List<IMethodSymbol>
             >(g => g.Key, v => [.. v], SymbolEqualityComparer.Default);
 
-        // Look through the candidate interfaces
+        // Look through the candidate types
         var interfaceSymbols = new List<INamedTypeSymbol>();
-        foreach (var group in candidateInterfaces.GroupBy(i => i.SyntaxTree))
+        foreach (var group in candidateBaseTypes.GroupBy(i => i.SyntaxTree))
         {
             var model = compilation.GetSemanticModel(group.Key);
-            foreach (var iface in group)
+            foreach (var type in group)
             {
-                // get the symbol belonging to the interface
-                var ifaceSymbol = model.GetDeclaredSymbol(
-                    iface,
+                // get the symbol belonging to the types
+                var typeSymbol = model.GetDeclaredSymbol(
+                    type,
                     cancellationToken: cancellationToken
                 );
 
                 // See if we already know about it, might be a dup
-                if (ifaceSymbol is null || interfaces.ContainsKey(ifaceSymbol))
+                if (typeSymbol is null || types.ContainsKey(typeSymbol))
                     continue;
 
-                // The interface has no refit methods, but its base interfaces might
-                var hasDerivedRefit = ifaceSymbol
-                    .AllInterfaces.SelectMany(i => i.GetMembers().OfType<IMethodSymbol>())
-                    .Any(m => IsRefitMethod(m, httpMethodBaseAttributeSymbol));
+                // The type has no refit methods, but its base interfaces might
+                var hasDerivedRefit = typeSymbol.TypeKind switch
+                {
+                    TypeKind.Interface => typeSymbol
+                        .AllInterfaces.SelectMany(i => i.GetMembers().OfType<IMethodSymbol>())
+                        .Any(m => IsRefitMethod(m, httpMethodBaseAttributeSymbol)),
+
+                    TypeKind.Class when typeSymbol.IsAbstract => typeSymbol
+                        .GetBaseTypesAndThis().Where(a => !a.Equals(typeSymbol, SymbolEqualityComparer.Default))
+                        .SelectMany(i => i.GetMembers().OfType<IMethodSymbol>())
+                        .Any(m => IsRefitMethod(m, httpMethodBaseAttributeSymbol)),
+
+                    _ => false
+                };
 
                 if (hasDerivedRefit)
                 {
                     // Add the interface to the generation list with an empty set of methods
                     // The logic already looks for base refit methods
-                    interfaces.Add(ifaceSymbol, []);
+                    types.Add(typeSymbol, []);
                     var isAnnotated =
-                        model.GetNullableContext(iface.SpanStart) == NullableContext.Enabled;
+                        model.GetNullableContext(type.SpanStart) == NullableContext.Enabled;
 
-                    interfaceToNullableEnabledMap[ifaceSymbol] = isAnnotated;
+                    interfaceToNullableEnabledMap[typeSymbol] = isAnnotated;
                 }
             }
         }
@@ -141,13 +152,13 @@ internal static class Parser
         cancellationToken.ThrowIfCancellationRequested();
 
         // Bail out if there aren't any interfaces to generate code for. This may be the case with transitives
-        if (interfaces.Count == 0)
+        if (types.Count == 0)
             return (
                 diagnostics,
                 new ContextGenerationModel(
                     refitInternalNamespace,
                     string.Empty,
-                    ImmutableEquatableArray.Empty<InterfaceModel>()
+                    ImmutableEquatableArray.Empty<TypeModel>()
                 )
             );
 
@@ -197,9 +208,9 @@ namespace {refitInternalNamespace}
             SymbolDisplayFormat.FullyQualifiedFormat
         );
 
-        var interfaceModels = new List<InterfaceModel>();
+        var baseTypeModels = new List<TypeModel>();
         // group the fields by interface and generate the source
-        foreach (var group in interfaces)
+        foreach (var group in types)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -215,7 +226,7 @@ namespace {refitInternalNamespace}
             keyCount[keyName] = value;
             var fileName = $"{keyName}.g.cs";
 
-            var interfaceModel = ProcessInterface(
+            var typeModel = ProcessBaseType(
                 fileName,
                 diagnostics,
                 group.Key,
@@ -227,56 +238,56 @@ namespace {refitInternalNamespace}
                 interfaceToNullableEnabledMap[group.Key]
             );
 
-            interfaceModels.Add(interfaceModel);
+            baseTypeModels.Add(typeModel);
         }
 
         var contextGenerationSpec = new ContextGenerationModel(
             refitInternalNamespace,
             preserveAttributeDisplayName,
-            interfaceModels.ToImmutableEquatableArray()
+            baseTypeModels.ToImmutableEquatableArray()
         );
         return (diagnostics, contextGenerationSpec);
     }
 
-    static InterfaceModel ProcessInterface(
+    static TypeModel ProcessBaseType(
         string fileName,
         List<Diagnostic> diagnostics,
-        INamedTypeSymbol interfaceSymbol,
+        INamedTypeSymbol baseTypeSymbol,
         List<IMethodSymbol> refitMethods,
         string preserveAttributeDisplayName,
-        ISymbol disposableInterfaceSymbol,
+        ISymbol disposableBaseTypeSymbol,
         INamedTypeSymbol httpMethodBaseAttributeSymbol,
         bool supportsNullable,
         bool nullableEnabled
     )
     {
         // Get the class name with the type parameters, then remove the namespace
-        var className = interfaceSymbol.ToDisplayString();
+        var className = baseTypeSymbol.ToDisplayString();
         var lastDot = className.LastIndexOf('.');
         if (lastDot > 0)
         {
             className = className.Substring(lastDot + 1);
         }
-        var classDeclaration = $"{interfaceSymbol.ContainingType?.Name}{className}";
+        var classDeclaration = $"{baseTypeSymbol.ContainingType?.Name}{className}";
 
         // Get the class name itself
-        var classSuffix = $"{interfaceSymbol.ContainingType?.Name}{interfaceSymbol.Name}";
-        var ns = interfaceSymbol.ContainingNamespace?.ToDisplayString();
+        var classSuffix = $"{baseTypeSymbol.ContainingType?.Name}{baseTypeSymbol.Name}";
+        var ns = baseTypeSymbol.ContainingNamespace?.ToDisplayString();
 
         // if it's the global namespace, our lookup rules say it should be the same as the class name
-        if (interfaceSymbol.ContainingNamespace is { IsGlobalNamespace: true })
+        if (baseTypeSymbol.ContainingNamespace is { IsGlobalNamespace: true })
         {
             ns = string.Empty;
         }
 
         // Remove dots
         ns = ns!.Replace(".", "");
-        var interfaceDisplayName = interfaceSymbol.ToDisplayString(
+        var interfaceDisplayName = baseTypeSymbol.ToDisplayString(
             SymbolDisplayFormat.FullyQualifiedFormat
         );
 
         // Get any other methods on the refit interfaces. We'll need to generate something for them and warn
-        var nonRefitMethods = interfaceSymbol
+        var nonRefitMethods = baseTypeSymbol
             .GetMembers()
             .OfType<IMethodSymbol>()
             .Except(refitMethods, SymbolEqualityComparer.Default)
@@ -284,14 +295,22 @@ namespace {refitInternalNamespace}
             .ToArray();
 
         // get methods for all inherited
-        var derivedMethods = interfaceSymbol
-            .AllInterfaces.SelectMany(i => i.GetMembers().OfType<IMethodSymbol>())
-            .ToList();
+        var derivedMethods = baseTypeSymbol.TypeKind switch
+        {
+            TypeKind.Interface => baseTypeSymbol
+                .AllInterfaces.SelectMany(i => i.GetMembers().OfType<IMethodSymbol>())
+                .ToList(),
+            TypeKind.Class when baseTypeSymbol.IsAbstract => baseTypeSymbol
+                .GetBaseTypesAndThis().Where(a => !a.Equals(baseTypeSymbol, SymbolEqualityComparer.Default))
+                .SelectMany(i => i.GetMembers().OfType<IMethodSymbol>())
+                .ToList(),
+            _ => [],
+        };
 
         // Look for disposable
         var disposeMethod = derivedMethods.Find(
             m =>
-                m.ContainingType?.Equals(disposableInterfaceSymbol, SymbolEqualityComparer.Default)
+                m.ContainingType?.Equals(disposableBaseTypeSymbol, SymbolEqualityComparer.Default)
                 == true
         );
         if (disposeMethod != null)
@@ -309,7 +328,7 @@ namespace {refitInternalNamespace}
             .Cast<IMethodSymbol>()
             .ToArray();
 
-        var memberNames = interfaceSymbol
+        var memberNames = baseTypeSymbol
             .GetMembers()
             .Select(x => x.Name)
             .Distinct()
@@ -319,10 +338,13 @@ namespace {refitInternalNamespace}
         var refitMethodsArray = refitMethods
             .Select(m => ParseMethod(m, true))
             .ToImmutableEquatableArray();
-        var derivedRefitMethodsArray = refitMethods
-            .Concat(derivedRefitMethods)
-            .Select(m => ParseMethod(m, false))
-            .ToImmutableEquatableArray();
+
+        var derivedRefitMethodsArray = baseTypeSymbol.TypeKind is TypeKind.Class
+            ? ImmutableEquatableArray<MethodModel>.Empty
+            : refitMethods
+                .Concat(derivedRefitMethods)
+                .Select(m => ParseMethod(m, false))
+                .ToImmutableEquatableArray();
 
         // Handle non-refit Methods that aren't static or properties or have a method body
         var nonRefitMethodModelList = new List<MethodModel>();
@@ -341,7 +363,7 @@ namespace {refitInternalNamespace}
 
         var nonRefitMethodModels = nonRefitMethodModelList.ToImmutableEquatableArray();
 
-        var constraints = GenerateConstraints(interfaceSymbol.TypeParameters, false);
+        var constraints = GenerateConstraints(baseTypeSymbol.TypeParameters, false);
         var hasDispose = disposeMethod != null;
         var nullability = (supportsNullable, nullableEnabled) switch
         {
@@ -349,7 +371,7 @@ namespace {refitInternalNamespace}
             (true, true) => Nullability.Enabled,
             (true, false) => Nullability.Disabled,
         };
-        return new InterfaceModel(
+        return new TypeModel(
             preserveAttributeDisplayName,
             fileName,
             className,
@@ -491,7 +513,7 @@ namespace {refitInternalNamespace}
         return false;
     }
 
-    private static MethodModel ParseMethod(IMethodSymbol methodSymbol, bool isImplicitInterface)
+    private static MethodModel ParseMethod(IMethodSymbol methodSymbol, bool isImplicit)
     {
         var returnType = methodSymbol.ReturnType.ToDisplayString(
             SymbolDisplayFormat.FullyQualifiedFormat
@@ -510,7 +532,7 @@ namespace {refitInternalNamespace}
 
         var parameters = methodSymbol.Parameters.Select(ParseParameter).ToImmutableEquatableArray();
 
-        var constraints = GenerateConstraints(methodSymbol.TypeParameters, !isImplicitInterface);
+        var constraints = GenerateConstraints(methodSymbol.TypeParameters, !isImplicit);
 
         return new MethodModel(
             methodSymbol.Name,
@@ -518,6 +540,7 @@ namespace {refitInternalNamespace}
             containingType,
             declaredMethod,
             returnTypeInfo,
+            methodSymbol.ContainingType.TypeKind is TypeKind.Class,
             parameters,
             constraints
         );

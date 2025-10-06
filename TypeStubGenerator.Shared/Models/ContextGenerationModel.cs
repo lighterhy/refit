@@ -3,5 +3,5 @@
 internal sealed record ContextGenerationModel(
     string RefitInternalNamespace,
     string PreserveAttributeDisplayName,
-    ImmutableEquatableArray<InterfaceModel> Interfaces
+    ImmutableEquatableArray<TypeModel> Types
 );

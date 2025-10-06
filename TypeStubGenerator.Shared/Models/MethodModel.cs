@@ -6,6 +6,7 @@ internal sealed record MethodModel(
     string ContainingType,
     string DeclaredMethod,
     ReturnTypeInfo ReturnTypeMetadata,
+    bool IsAbstract,
     ImmutableEquatableArray<ParameterModel> Parameters,
     ImmutableEquatableArray<TypeConstraint> Constraints
 );

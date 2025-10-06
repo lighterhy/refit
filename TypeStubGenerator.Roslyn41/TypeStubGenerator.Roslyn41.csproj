@@ -25,6 +25,6 @@
     </PropertyGroup>
   </Target>
 
-  <Import Project="..\InterfaceStubGenerator.Shared\InterfaceStubGenerator.Shared.projitems" Label="Shared" />
+  <Import Project="..\TypeStubGenerator.Shared\TypeStubGenerator.Shared.projitems" Label="Shared" />
 
 </Project>
